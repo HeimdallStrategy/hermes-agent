@@ -1703,7 +1703,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                         s.started_at
-                    ) AS last_active,
+                    ) AS _computed_last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
@@ -1727,7 +1727,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                         s.started_at
-                    ) AS last_active
+                    ) AS _computed_last_active
                 FROM sessions s
                 {where_sql}
                 ORDER BY s.started_at DESC
@@ -1740,6 +1740,17 @@ class SessionDB:
         sessions = []
         for row in rows:
             s = dict(row)
+            # Do not alias the SQL expression as ``last_active`` directly.
+            # Some upgraded state.db files still carry a nullable
+            # ``sessions.last_active`` column; sqlite3.Row maps duplicate
+            # column names to the first occurrence from ``s.*`` and would drop
+            # the computed fallback.
+            computed_last_active = s.pop("_computed_last_active", None)
+            if computed_last_active is not None:
+                s["last_active"] = computed_last_active
+            elif s.get("last_active") is None:
+                s["last_active"] = s.get("started_at")
+
             # Build the preview from the raw substring
             raw = s.pop("_preview_raw", "").strip()
             if raw:
@@ -1804,7 +1815,7 @@ class SessionDB:
                 COALESCE(
                     (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                     s.started_at
-                ) AS last_active
+                ) AS _computed_last_active
             FROM sessions s
             WHERE s.id = ?
         """
@@ -1814,6 +1825,13 @@ class SessionDB:
         if not row:
             return None
         s = dict(row)
+        # See list_sessions_rich(): avoid duplicate ``last_active`` aliases on
+        # legacy DBs that still have a physical sessions.last_active column.
+        computed_last_active = s.pop("_computed_last_active", None)
+        if computed_last_active is not None:
+            s["last_active"] = computed_last_active
+        elif s.get("last_active") is None:
+            s["last_active"] = s.get("started_at")
         raw = s.pop("_preview_raw", "").strip()
         if raw:
             text = raw[:60]
@@ -3101,7 +3119,7 @@ class SessionDB:
         ordered by most-recently-used first.
         """
         select_with_last_active = (
-            "SELECT s.*, COALESCE(m.last_active, s.started_at) AS last_active "
+            "SELECT s.*, COALESCE(m.last_active, s.started_at) AS _computed_last_active "
             "FROM sessions s "
             "LEFT JOIN ("
             "SELECT session_id, MAX(timestamp) AS last_active "
@@ -3113,16 +3131,27 @@ class SessionDB:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
                     "WHERE s.source = ? "
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    "ORDER BY _computed_last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (source, limit, offset),
                 )
             else:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    "ORDER BY _computed_last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
-            return [dict(row) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+
+        sessions = []
+        for row in rows:
+            session = dict(row)
+            computed_last_active = session.pop("_computed_last_active", None)
+            if computed_last_active is not None:
+                session["last_active"] = computed_last_active
+            elif session.get("last_active") is None:
+                session["last_active"] = session.get("started_at")
+            sessions.append(session)
+        return sessions
 
     # =========================================================================
     # Utility
@@ -3893,7 +3922,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                             s.started_at
-                        ) AS last_active
+                        ) AS _computed_last_active
                     FROM sessions s
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
@@ -3901,7 +3930,7 @@ class SessionDB:
                           SELECT 1 FROM telegram_dm_topic_bindings b
                           WHERE b.session_id = s.id
                       )
-                    ORDER BY last_active DESC, s.started_at DESC
+                    ORDER BY _computed_last_active DESC, s.started_at DESC
                     LIMIT ?
                     """,
                     (str(user_id), int(limit)),
@@ -3922,11 +3951,11 @@ class SessionDB:
                         COALESCE(
                             (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                             s.started_at
-                        ) AS last_active
+                        ) AS _computed_last_active
                     FROM sessions s
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
-                    ORDER BY last_active DESC, s.started_at DESC
+                    ORDER BY _computed_last_active DESC, s.started_at DESC
                     LIMIT ?
                     """,
                     (str(user_id), int(limit)),
@@ -3935,6 +3964,11 @@ class SessionDB:
         sessions: List[Dict[str, Any]] = []
         for row in rows:
             session = dict(row)
+            computed_last_active = session.pop("_computed_last_active", None)
+            if computed_last_active is not None:
+                session["last_active"] = computed_last_active
+            elif session.get("last_active") is None:
+                session["last_active"] = session.get("started_at")
             raw = str(session.pop("_preview_raw", "") or "").strip()
             session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
             sessions.append(session)

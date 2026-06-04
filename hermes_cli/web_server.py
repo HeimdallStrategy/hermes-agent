@@ -787,7 +787,7 @@ async def get_status():
             active_sessions = sum(
                 1 for s in sessions
                 if s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                and (now - (s.get("last_active") or s.get("started_at") or 0)) < 300
             )
         finally:
             db.close()
@@ -1595,9 +1595,10 @@ async def get_sessions(
             )
             now = time.time()
             for s in sessions:
+                activity = s.get("last_active") or s.get("started_at") or 0
                 s["is_active"] = (
                     s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                    and (now - activity) < 300
                 )
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))

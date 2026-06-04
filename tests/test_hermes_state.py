@@ -196,6 +196,54 @@ class TestSessionLifecycle:
                                model="xiaomi/mimo-v2.5-pro")
         assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
 
+    def test_list_sessions_rich_handles_legacy_null_last_active_column(self, db):
+        """Legacy DBs may have a nullable sessions.last_active column.
+
+        list_sessions_rich selects ``s.*`` plus an enriched last-active value.
+        If the enriched expression reuses the name ``last_active``, sqlite3.Row
+        maps the first duplicate name from ``s.*`` and drops the computed
+        fallback, exposing ``None`` to dashboard callers.
+        """
+        db._conn.execute("ALTER TABLE sessions ADD COLUMN last_active REAL")
+        db._conn.commit()
+
+        before = time.time()
+        db.create_session(session_id="empty", source="tui")
+        db.create_session(session_id="with-msg", source="tui")
+        db.append_message("with-msg", role="user", content="hello")
+
+        for order_by_last_active in (False, True):
+            rows = {
+                row["id"]: row
+                for row in db.list_sessions_rich(
+                    limit=10,
+                    order_by_last_active=order_by_last_active,
+                )
+            }
+            assert rows["empty"]["last_active"] == rows["empty"]["started_at"]
+            assert rows["with-msg"]["last_active"] >= before
+
+        empty_row = db._get_session_rich_row("empty")
+        msg_row = db._get_session_rich_row("with-msg")
+        assert empty_row["last_active"] == empty_row["started_at"]
+        assert msg_row["last_active"] >= before
+
+        search_rows = {row["id"]: row for row in db.search_sessions(limit=10)}
+        assert search_rows["empty"]["last_active"] == search_rows["empty"]["started_at"]
+        assert search_rows["with-msg"]["last_active"] >= before
+
+        db.create_session(session_id="telegram-empty", source="telegram", user_id="u1")
+        db.create_session(session_id="telegram-with-msg", source="telegram", user_id="u1")
+        db.append_message("telegram-with-msg", role="user", content="telegram hello")
+        telegram_rows = {
+            row["id"]: row
+            for row in db.list_unlinked_telegram_sessions_for_user(
+                chat_id="chat", user_id="u1", limit=10
+            )
+        }
+        assert telegram_rows["telegram-empty"]["last_active"] == telegram_rows["telegram-empty"]["started_at"]
+        assert telegram_rows["telegram-with-msg"]["last_active"] >= before
+
     def test_parent_session(self, db):
         db.create_session(session_id="parent", source="cli")
         db.create_session(session_id="child", source="cli", parent_session_id="parent")
